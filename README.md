@@ -1,13 +1,21 @@
 # PSAT Web Version
 
-This is a pure frontend implementation of PSAT using React, Three.js, and loaders.gl.
+This is the web-based version of the Point Cloud Segmentation Annotation Tool (PSAT). It enables smooth visualization and basic component annotation of large point clouds directly in the browser.
 
-## Prerequisites
+## 🛠 Technology Stack
 
-- Node.js (v18+)
-- npm
+- **Framework**: [React](https://reactjs.org/) (with Vite for fast development)
+- **3D Engine**: [Three.js](https://threejs.org/)
+- **Data Loading**: [loaders.gl](https://loaders.gl/) (focused on `.las` and `.laz` support)
+- **State Management**: [Zustand](https://github.com/pmndrs/zustand)
+- **Styling**: Vanilla CSS
 
-## Setup & Run
+## 📋 Prerequisites
+
+- **Node.js**: v18 or later (v20+ recommended)
+- **npm**: v9 or later
+
+## 🚀 Setup & Run
 
 1.  Navigate to the `web` directory:
     ```bash
@@ -26,29 +34,49 @@ This is a pure frontend implementation of PSAT using React, Three.js, and loader
 
 4.  Open your browser at `http://localhost:5173`.
 
-## Features
+## 🏗 Development
 
--   Load local `.las` / `.laz` files; matching `.json` metadata is loaded when included in the same selection or folder.
--   Visualize point clouds in 3D (RGB / Class / Instance view).
--   Component annotation (add/edit/delete, keyboard nudge).
--   JSON export/import for metadata + components (no per-point labels).
+- **Layout**: The main layout is defined in `src/App.jsx`.
+- **UI Components**: Simple UI components are used for controls and lists.
+- **Three.js Scene**: Look into `src/App.jsx` for the Three.js initialization and point cloud loading logic.
 
-## Limitations (Compared to Desktop Qt)
--   No polygon/box/lasso selection for per-point labeling.
--   No per-point class/instance editing.
--   No LAZ/LAS write-back from the browser.
--   No category/instance visibility panels.
+## 📦 Git Submodule Management
 
-## Data Formats
-**Input**
--   Point cloud files: `.las/.laz`
--   Optional matching JSON (same basename, `.json`)
--   JSON may include: `categories` or `categorys` (per-point class array, length = point count)
--   JSON may include: `instances` (per-point instance array, length = point count)
--   JSON may include: `voltage_level`, `tower_type1`/`tower_type`, `tower_type2`/`tower_shape`, `transmission_type`, `num_circuit`
--   JSON may include: `components`, `small_tower_coord`, `large_tower_coord`
--   Note: the Web viewer reads standard `classification` and ExtraBytes `instance` (uint32) / `category` (uint16) when present
--   Note: due to browser restrictions, a matching `.json` is only loaded if it is included in the file selection or folder
+This directory is a Git submodule. When working with it:
 
-**Output**
--   Exported JSON contains metadata + components only (no per-point labels).
+- **Updating in main repo**: If you make changes inside `web/` and commit/push them to the `PSAT-web` repository, you must also go back to the root `PSAT` directory and commit the reference change.
+- **Cloning with submodules**:
+  ```bash
+  git clone --recursive <main-repo-url>
+  ```
+- **Pulling changes**:
+  ```bash
+  git pull origin master
+  ```
+  And then update submodules:
+  ```bash
+  git submodule update --init --recursive
+  ```
+
+## ✨ Features
+
+- **High Performance**: Renders hundreds of thousands of points smoothly using `loaders.gl`.
+- **Flexible Viewing**: Toggle between RGB, Classification, and Instance views.
+- **Component Annotation**: Click to add components, adjust them with keyboard nudges, and export as JSON.
+- **Local privacy**: All processing happens in your browser; no data is uploaded to a server.
+
+## ⚠️ Limitations (Compared to Desktop Qt)
+- No polygon/box/lasso selection for per-point labeling.
+- No per-point class/instance editing.
+- No LAZ/LAS write-back from the browser.
+- No category/instance visibility panels.
+
+## 📁 Data Formats
+
+### Input
+- **Point clouds**: `.las` / `.laz` files.
+- **Metadata**: Matching `.json` file (must be selected together with the point cloud due to browser security).
+- **ExtraBytes**: Support for `instance` (uint32) and `category` (uint16) extra bytes in LAS/LAZ.
+
+### Output
+- **JSON**: Contains metadata and component points. Does **not** include point-level labels.
