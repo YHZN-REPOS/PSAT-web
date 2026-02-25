@@ -11,6 +11,7 @@ extend({ Points: THREE.Points })
 
 const TOWER_SMALL_NAME = '小号侧'
 const TOWER_LARGE_NAME = '大号侧'
+const TEMP_HIDDEN_COMPONENT_TYPE = '绝缘子串'
 const DEFAULT_CATEGORY_DICT = {
     1: 'Background',
     2: 'Tower',
@@ -69,6 +70,7 @@ const BASE_POINT_SIZES = {
     2: 26,
     3: 34
 }
+const PLANAR_ROTATE_SPEED = 0.006
 
 const toNumber = (value, fallback = 0) => {
     const n = Number.parseFloat(value)
@@ -148,6 +150,11 @@ const normalizeComponent = (component, index = 0) => {
         tower_side: component?.tower_side ?? '',
         isTowerSide
     }
+}
+
+const isTemporarilyHiddenComponent = (component) => {
+    const componentType = component?.component_type
+    return typeof componentType === 'string' && componentType.trim() === TEMP_HIDDEN_COMPONENT_TYPE
 }
 
 const buildInstanceCategoryDict = (categories, instances) => {
@@ -438,7 +445,8 @@ function PointCloud({ data, onPick, viewMode, pointSize, componentAddMode, onSet
 
     // Raycasting for point picking
     const handlePointerDown = useCallback((e) => {
-        const allowPick = componentAddMode ? e.metaKey : (e.ctrlKey || e.metaKey)
+        if (!onPick || !componentAddMode) return
+        const allowPick = e.ctrlKey || e.metaKey
         if (!allowPick) return
         if (e.detail && e.detail > 1) return
         if (!geometry) return
@@ -498,6 +506,7 @@ function ComponentMarkers({ components, onDelete, offset, selectedIndex, onSelec
     return (
         <group>
             {components.map((comp, idx) => {
+                if (isTemporarilyHiddenComponent(comp)) return null
                 let pos = null
                 if (comp.originalPosition) {
                     pos = new THREE.Vector3(
@@ -565,6 +574,14 @@ function Scene({
 }) {
     console.log('Scene: Render start. lasData:', !!lasData, 'Components:', components.length)
     const controlsRef = useRef()
+    const { camera, gl } = useThree()
+    const planarRotateStateRef = useRef({
+        active: false,
+        pointerId: null,
+        lastX: 0,
+        restoreEnableRotate: true,
+        restoreEnablePan: true
+    })
 
     // Calculate offset from LAS header
     const offset = useMemo(() => {
@@ -612,7 +629,7 @@ function Scene({
     }, [components, offset])
 
     const handlePick = (pickData) => {
-        if (onRequestAddComponent) {
+        if (componentAddMode && onRequestAddComponent) {
             onRequestAddComponent(pickData)
         }
     }
@@ -622,6 +639,101 @@ function Scene({
         controlsRef.current.target.copy(target)
         controlsRef.current.update()
     }, [])
+
+    useEffect(() => {
+        const canvas = gl?.domElement
+        if (!canvas) return
+
+        const stopPlanarRotate = () => {
+            const state = planarRotateStateRef.current
+            if (!state.active) return
+            const controls = controlsRef.current
+            if (controls) {
+                controls.enableRotate = state.restoreEnableRotate
+                controls.enablePan = state.restoreEnablePan
+            }
+            state.active = false
+            state.pointerId = null
+        }
+
+        const onPointerDown = (event) => {
+            if (event.button !== 0 || !event.shiftKey) return
+            const controls = controlsRef.current
+            if (!controls) return
+            event.preventDefault()
+            event.stopPropagation()
+            const state = planarRotateStateRef.current
+            state.active = true
+            state.pointerId = event.pointerId
+            state.lastX = event.clientX
+            state.restoreEnableRotate = controls.enableRotate
+            state.restoreEnablePan = controls.enablePan
+            controls.enableRotate = false
+            controls.enablePan = false
+            if (canvas.setPointerCapture && event.pointerId !== undefined) {
+                try {
+                    canvas.setPointerCapture(event.pointerId)
+                } catch {
+                    // Ignore capture failures on unsupported browsers/devices.
+                }
+            }
+        }
+
+        const onPointerMove = (event) => {
+            const state = planarRotateStateRef.current
+            if (!state.active) return
+            if (state.pointerId !== null && event.pointerId !== state.pointerId) return
+            event.preventDefault()
+            event.stopPropagation()
+            const deltaX = event.clientX - state.lastX
+            state.lastX = event.clientX
+            if (!Number.isFinite(deltaX) || deltaX === 0) return
+
+            const controls = controlsRef.current
+            if (!controls) return
+
+            const viewAxis = new THREE.Vector3().subVectors(camera.position, controls.target)
+            if (viewAxis.lengthSq() < 1e-12) return
+            viewAxis.normalize()
+            const roll = -deltaX * PLANAR_ROTATE_SPEED
+            const rollQuat = new THREE.Quaternion().setFromAxisAngle(viewAxis, roll)
+            camera.up.applyQuaternion(rollQuat).normalize()
+            controls.update()
+        }
+
+        const onPointerUp = (event) => {
+            const state = planarRotateStateRef.current
+            if (!state.active) return
+            if (state.pointerId !== null && event.pointerId !== state.pointerId) return
+            event.stopPropagation()
+            if (canvas.releasePointerCapture && event.pointerId !== undefined && canvas.hasPointerCapture?.(event.pointerId)) {
+                try {
+                    canvas.releasePointerCapture(event.pointerId)
+                } catch {
+                    // Ignore release failures when pointer capture state changes unexpectedly.
+                }
+            }
+            stopPlanarRotate()
+        }
+
+        const onPointerCancel = () => stopPlanarRotate()
+        const onBlur = () => stopPlanarRotate()
+
+        const pointerCaptureOptions = { capture: true }
+        canvas.addEventListener('pointerdown', onPointerDown, pointerCaptureOptions)
+        canvas.addEventListener('pointermove', onPointerMove, pointerCaptureOptions)
+        canvas.addEventListener('pointerup', onPointerUp, pointerCaptureOptions)
+        canvas.addEventListener('pointercancel', onPointerCancel, pointerCaptureOptions)
+        window.addEventListener('blur', onBlur)
+        return () => {
+            canvas.removeEventListener('pointerdown', onPointerDown, pointerCaptureOptions)
+            canvas.removeEventListener('pointermove', onPointerMove, pointerCaptureOptions)
+            canvas.removeEventListener('pointerup', onPointerUp, pointerCaptureOptions)
+            canvas.removeEventListener('pointercancel', onPointerCancel, pointerCaptureOptions)
+            window.removeEventListener('blur', onBlur)
+            stopPlanarRotate()
+        }
+    }, [camera, gl])
 
     return (
         <>
@@ -708,43 +820,11 @@ function App() {
                 }
                 return
             }
-
-            if (selectedComponentIndex < 0) return
-
-            let axis = null
-            let direction = 0
-            if (e.key === 'ArrowLeft') {
-                axis = 0
-                direction = -1
-            } else if (e.key === 'ArrowRight') {
-                axis = 0
-                direction = 1
-            } else if (e.key === 'ArrowUp') {
-                axis = e.ctrlKey ? 2 : 1
-                direction = 1
-            } else if (e.key === 'ArrowDown') {
-                axis = e.ctrlKey ? 2 : 1
-                direction = -1
-            }
-
-            if (axis === null) return
-            e.preventDefault()
-
-            setComponents((prev) => {
-                if (selectedComponentIndex >= prev.length) return prev
-                const next = [...prev]
-                const current = { ...next[selectedComponentIndex] }
-                const coord = readComponentCoord(current)
-                coord[axis] = toNumber(coord[axis]) + nudgeStep * direction
-                current.originalPosition = coord
-                next[selectedComponentIndex] = current
-                return next
-            })
         }
 
         window.addEventListener('keydown', handleKeyDown)
         return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [addDialogOpen, componentAddMode, nudgeStep, selectedComponentIndex])
+    }, [addDialogOpen, componentAddMode])
 
     // Helper to load specific files
     const loadFiles = async (lasFile, jsonFile) => {
@@ -1082,6 +1162,13 @@ function App() {
     const composedComponentName = useMemo(() => (
         buildComponentName(selectedLoop, selectedPhase, selectedPosition, selectedComponentType)
     ), [selectedLoop, selectedPhase, selectedPosition, selectedComponentType])
+    const visibleComponentEntries = useMemo(
+        () => components
+            .map((comp, index) => ({ comp, index }))
+            .filter(({ comp }) => !isTemporarilyHiddenComponent(comp)),
+        [components]
+    )
+    const hiddenComponentCount = components.length - visibleComponentEntries.length
 
     useEffect(() => {
         if (!isTowerSideSelection) return
@@ -1133,15 +1220,12 @@ function App() {
                     components={components}
                     viewMode={viewMode}
                     pointSize={pointSize}
-                    componentAddMode={componentAddMode}
+                    componentAddMode={false}
                     selectedComponentIndex={selectedComponentIndex}
                     setSelectedComponentIndex={setSelectedComponentIndex}
-                    onDeleteComponent={deleteComponentAt}
+                    onDeleteComponent={undefined}
                     componentPointSize={componentPointSize}
-                    onRequestAddComponent={(pickData) => {
-                        setPendingPick(pickData)
-                        setAddDialogOpen(true)
-                    }}
+                    onRequestAddComponent={undefined}
                 />
             </Canvas>
 
@@ -1235,6 +1319,7 @@ function App() {
                         <select
                             value={labelMeta.voltage_level || ''}
                             onChange={(e) => updateMetaField('voltage_level', e.target.value)}
+                            disabled
                             style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '6px' }}
                         >
                             {VOLTAGE_LEVEL_OPTIONS.map(option => (
@@ -1246,6 +1331,7 @@ function App() {
                         <select
                             value={labelMeta.tower_type1 || ''}
                             onChange={(e) => updateMetaField('tower_type1', e.target.value)}
+                            disabled
                             style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '6px' }}
                         >
                             {TOWER_TYPE1_OPTIONS.map(option => (
@@ -1257,6 +1343,7 @@ function App() {
                         <select
                             value={labelMeta.tower_type2 || ''}
                             onChange={(e) => updateMetaField('tower_type2', e.target.value)}
+                            disabled
                             style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '6px' }}
                         >
                             {TOWER_TYPE2_OPTIONS.map(option => (
@@ -1268,6 +1355,7 @@ function App() {
                         <select
                             value={labelMeta.transmission_type || ''}
                             onChange={(e) => updateMetaField('transmission_type', e.target.value)}
+                            disabled
                             style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '6px' }}
                         >
                             {TRANSMISSION_TYPE_OPTIONS.map(option => (
@@ -1283,6 +1371,7 @@ function App() {
                                     : String(labelMeta.num_circuit)
                             }
                             onChange={(e) => updateMetaField('num_circuit', e.target.value)}
+                            disabled
                             style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '6px' }}
                         >
                             {NUM_CIRCUIT_OPTIONS.map(option => (
@@ -1352,38 +1441,8 @@ function App() {
                 {lasData && (
                     <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', gap: '10px' }}>
-                            <h4 style={{ margin: 0 }}>Components ({components.length})</h4>
+                            <h4 style={{ margin: 0 }}>Components ({visibleComponentEntries.length})</h4>
                             <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                <button
-                                    onClick={() => setComponentAddMode((prev) => !prev)}
-                                    style={{
-                                        background: componentAddMode ? '#2ecc71' : '#444',
-                                        border: 'none',
-                                        color: 'white',
-                                        padding: '5px 10px',
-                                        borderRadius: '4px',
-                                        cursor: 'pointer',
-                                        fontSize: '0.8rem'
-                                    }}
-                                >
-                                    {componentAddMode ? 'Add Mode: On' : 'Add Component'}
-                                </button>
-                                {componentAddMode && (
-                                    <button
-                                        onClick={() => setComponentAddMode(false)}
-                                        style={{
-                                            background: '#ff6b6b',
-                                            border: 'none',
-                                            color: 'white',
-                                            padding: '5px 10px',
-                                            borderRadius: '4px',
-                                            cursor: 'pointer',
-                                            fontSize: '0.8rem'
-                                        }}
-                                    >
-                                        Exit Mode
-                                    </button>
-                                )}
                                 <button onClick={exportJSON} style={{
                                     background: '#228be6',
                                     border: 'none',
@@ -1397,30 +1456,13 @@ function App() {
                         </div>
 
                         <div style={{ fontSize: '0.85rem', color: '#aaa', marginBottom: '8px' }}>
-                            {componentAddMode
-                                ? 'Add mode: Cmd + Click to choose name • ESC to exit'
-                                : 'Tip: Cmd/Ctrl + Click to add component • Double Click sets rotation center'}
+                            View only: component add/edit/delete is disabled in Web • Shift + Left Drag for planar rotate • Double Click sets rotation center
                         </div>
-
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: '#bbb', fontSize: '0.8rem' }}>
-                            <span>Step</span>
-                            <input
-                                type="number"
-                                min="0.01"
-                                step="0.01"
-                                value={nudgeStep}
-                                onChange={(e) => setNudgeStep(toNumber(e.target.value, 0.1))}
-                                style={{
-                                    width: '80px',
-                                    background: '#222',
-                                    color: '#fff',
-                                    border: '1px solid #444',
-                                    borderRadius: '4px',
-                                    padding: '4px 6px'
-                                }}
-                            />
-                            <span>Arrow keys move selected (Ctrl+↑/↓ for Z)</span>
-                        </div>
+                        {hiddenComponentCount > 0 && (
+                            <div style={{ fontSize: '0.8rem', color: '#f39c12', marginBottom: '8px' }}>
+                                Temporary: {hiddenComponentCount} component(s) with type "{TEMP_HIDDEN_COMPONENT_TYPE}" are hidden in Web view.
+                            </div>
+                        )}
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: '#bbb', fontSize: '0.8rem' }}>
                             <span>Marker Size</span>
@@ -1437,14 +1479,14 @@ function App() {
                         </div>
 
                         <div style={{ maxHeight: '320px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', borderRadius: '4px' }}>
-                            {components.length === 0 && <div style={{ padding: '10px', color: '#666', textAlign: 'center' }}>No components added</div>}
-                            {components.map((comp, i) => {
+                            {visibleComponentEntries.length === 0 && <div style={{ padding: '10px', color: '#666', textAlign: 'center' }}>No components added</div>}
+                            {visibleComponentEntries.map(({ comp, index: originalIndex }) => {
                                 const coord = readComponentCoord(comp)
-                                const isSelected = i === selectedComponentIndex
+                                const isSelected = originalIndex === selectedComponentIndex
                                 return (
                                     <div
-                                        key={i}
-                                        onClick={() => setSelectedComponentIndex(i)}
+                                        key={originalIndex}
+                                        onClick={() => setSelectedComponentIndex(originalIndex)}
                                         style={{
                                             padding: '8px',
                                             borderBottom: '1px solid #444',
@@ -1453,11 +1495,7 @@ function App() {
                                         }}
                                     >
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                            <input
-                                                type="text"
-                                                value={comp.name || comp.component_name || ''}
-                                                onChange={(e) => updateComponentAt(i, { name: e.target.value, component_name: e.target.value })}
-                                                onFocus={() => setSelectedComponentIndex(i)}
+                                            <div
                                                 style={{
                                                     flex: 1,
                                                     background: '#222',
@@ -1467,45 +1505,30 @@ function App() {
                                                     padding: '4px 6px',
                                                     fontSize: '0.85rem'
                                                 }}
-                                            />
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation()
-                                                    deleteComponentAt(i)
-                                                }}
-                                                style={{
-                                                    background: 'none',
-                                                    border: 'none',
-                                                    color: '#ff6b6b',
-                                                    cursor: 'pointer',
-                                                    fontSize: '1.1rem',
-                                                    lineHeight: 1
-                                                }}
-                                            >×</button>
+                                            >
+                                                {comp.name || comp.component_name || ''}
+                                            </div>
                                         </div>
                                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginTop: '6px' }}>
                                             <input
                                                 type="number"
                                                 step="0.01"
                                                 value={coord[0]}
-                                                onChange={(e) => updateComponentCoord(i, 0, Number.parseFloat(e.target.value))}
-                                                onFocus={() => setSelectedComponentIndex(i)}
+                                                readOnly
                                                 style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '4px 6px' }}
                                             />
                                             <input
                                                 type="number"
                                                 step="0.01"
                                                 value={coord[1]}
-                                                onChange={(e) => updateComponentCoord(i, 1, Number.parseFloat(e.target.value))}
-                                                onFocus={() => setSelectedComponentIndex(i)}
+                                                readOnly
                                                 style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '4px 6px' }}
                                             />
                                             <input
                                                 type="number"
                                                 step="0.01"
                                                 value={coord[2]}
-                                                onChange={(e) => updateComponentCoord(i, 2, Number.parseFloat(e.target.value))}
-                                                onFocus={() => setSelectedComponentIndex(i)}
+                                                readOnly
                                                 style={{ background: '#222', color: '#fff', border: '1px solid #444', borderRadius: '4px', padding: '4px 6px' }}
                                             />
                                         </div>
@@ -1519,207 +1542,6 @@ function App() {
                 )}
             </div>
 
-            {addDialogOpen && (
-                <div style={{
-                    position: 'absolute',
-                    inset: 0,
-                    background: 'rgba(0,0,0,0.55)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    zIndex: 20
-                }}>
-                    <div style={{
-                        width: '720px',
-                        maxWidth: '92vw',
-                        maxHeight: '85vh',
-                        overflowY: 'auto',
-                        background: '#1d1f22',
-                        borderRadius: '12px',
-                        padding: '18px',
-                        boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
-                        color: '#fff'
-                    }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                            <h3 style={{ margin: 0 }}>选择部件名称</h3>
-                            <button
-                                onClick={() => {
-                                    setAddDialogOpen(false)
-                                    setPendingPick(null)
-                                    setSelectedLoop('')
-                                    setSelectedPhase('')
-                                    setSelectedPosition('')
-                                    setSelectedComponentType('')
-                                }}
-                                style={{
-                                    background: 'none',
-                                    border: 'none',
-                                    color: '#aaa',
-                                    fontSize: '1.2rem',
-                                    cursor: 'pointer'
-                                }}
-                            >×</button>
-                        </div>
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
-                            <div>
-                                <div style={{ fontSize: '0.8rem', color: '#bbb', marginBottom: '6px' }}>回路</div>
-                                <select
-                                    value={selectedLoop}
-                                    onChange={(e) => setSelectedLoop(e.target.value)}
-                                    disabled={isTowerSideSelection}
-                                    style={{
-                                        width: '100%',
-                                        background: '#2b2f33',
-                                        color: '#fff',
-                                        border: '1px solid #444',
-                                        borderRadius: '6px',
-                                        padding: '8px'
-                                    }}
-                                >
-                                    {LOOP_OPTIONS.map(option => (
-                                        <option key={`loop-${option || 'none'}`} value={option}>
-                                            {option || '回路'}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <div style={{ fontSize: '0.8rem', color: '#bbb', marginBottom: '6px' }}>相位</div>
-                                <select
-                                    value={selectedPhase}
-                                    onChange={(e) => setSelectedPhase(e.target.value)}
-                                    disabled={isTowerSideSelection}
-                                    style={{
-                                        width: '100%',
-                                        background: '#2b2f33',
-                                        color: '#fff',
-                                        border: '1px solid #444',
-                                        borderRadius: '6px',
-                                        padding: '8px'
-                                    }}
-                                >
-                                    {PHASE_OPTIONS.map(option => (
-                                        <option key={`phase-${option || 'none'}`} value={option}>
-                                            {option || '相位'}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <div style={{ fontSize: '0.8rem', color: '#bbb', marginBottom: '6px' }}>相对位置</div>
-                                <select
-                                    value={selectedPosition}
-                                    onChange={(e) => {
-                                        const value = e.target.value
-                                        setSelectedPosition(value)
-                                        if (value === TOWER_SMALL_NAME || value === TOWER_LARGE_NAME) {
-                                            setSelectedLoop('')
-                                            setSelectedPhase('')
-                                            setSelectedComponentType('')
-                                        }
-                                    }}
-                                    style={{
-                                        width: '100%',
-                                        background: '#2b2f33',
-                                        color: '#fff',
-                                        border: '1px solid #444',
-                                        borderRadius: '6px',
-                                        padding: '8px'
-                                    }}
-                                >
-                                    {POSITION_OPTIONS.map(option => (
-                                        <option key={`pos-${option || 'none'}`} value={option}>
-                                            {option || '相对位置'}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <div style={{ fontSize: '0.8rem', color: '#bbb', marginBottom: '6px' }}>部件类型</div>
-                                <select
-                                    value={selectedComponentType}
-                                    onChange={(e) => setSelectedComponentType(e.target.value)}
-                                    disabled={isTowerSideSelection}
-                                    style={{
-                                        width: '100%',
-                                        background: '#2b2f33',
-                                        color: '#fff',
-                                        border: '1px solid #444',
-                                        borderRadius: '6px',
-                                        padding: '8px'
-                                    }}
-                                >
-                                    {COMPONENT_TYPE_OPTIONS.map(option => (
-                                        <option key={`type-${option || 'none'}`} value={option}>
-                                            {option || '部件类型'}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        </div>
-
-                        <div style={{ marginBottom: '12px' }}>
-                            <div style={{ fontSize: '0.8rem', color: '#bbb', marginBottom: '6px' }}>
-                                部件名称（由属性拼接，小号侧/大号侧仅使用位置）
-                            </div>
-                            <input
-                                type="text"
-                                value={composedComponentName}
-                                readOnly
-                                placeholder="请选择部件属性"
-                                style={{
-                                    width: '100%',
-                                    background: '#2b2f33',
-                                    color: '#fff',
-                                    border: '1px solid #444',
-                                    borderRadius: '6px',
-                                    padding: '8px'
-                                }}
-                            />
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                            <button
-                                onClick={() => {
-                                    setAddDialogOpen(false)
-                                    setPendingPick(null)
-                                    setSelectedLoop('')
-                                    setSelectedPhase('')
-                                    setSelectedPosition('')
-                                    setSelectedComponentType('')
-                                }}
-                                style={{
-                                    background: '#3b3f44',
-                                    border: 'none',
-                                    color: '#ddd',
-                                    padding: '8px 14px',
-                                    borderRadius: '6px',
-                                    cursor: 'pointer'
-                                }}
-                            >
-                                取消
-                            </button>
-                            <button
-                                onClick={handleConfirmAdd}
-                                disabled={!composedComponentName}
-                                style={{
-                                    background: composedComponentName ? '#2ecc71' : '#3b3f44',
-                                    border: 'none',
-                                    color: composedComponentName ? '#fff' : '#888',
-                                    padding: '8px 14px',
-                                    borderRadius: '6px',
-                                    cursor: composedComponentName ? 'pointer' : 'not-allowed',
-                                    fontWeight: 600
-                                }}
-                            >
-                                添加
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {/* Help Tip */}
             <div style={{
                 position: 'absolute',
@@ -1732,7 +1554,7 @@ function App() {
                 fontSize: '0.9rem',
                 pointerEvents: 'none'
             }}>
-                Left Click: Rotate • Right Click: Pan • Scroll: Zoom • <strong>Cmd + Click: Add</strong> • Double Click: Set Center
+                Left Click: Rotate • Right Click: Pan • Scroll: Zoom • Shift + Left Drag: Planar Rotate • Double Click: Set Center
             </div>
         </div>
     )

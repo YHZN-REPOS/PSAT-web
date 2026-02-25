@@ -1,6 +1,6 @@
 # PSAT Web Version
 
-This is the web-based version of the Point Cloud Segmentation Annotation Tool (PSAT). It enables smooth visualization and basic component annotation of large point clouds directly in the browser.
+This is the web-based version of the Point Cloud Segmentation Annotation Tool (PSAT). It focuses on smooth visualization of large point clouds directly in the browser.
 
 ## 🛠 Technology Stack
 
@@ -62,14 +62,16 @@ This directory is a Git submodule. When working with it:
 
 - **High Performance**: Renders hundreds of thousands of points smoothly using `loaders.gl`.
 - **Flexible Viewing**: Toggle between RGB, Classification, and Instance views.
-- **Component Annotation**: Click to add components, adjust them with keyboard nudges, and export as JSON.
+- **Read-only Components**: Display existing components from JSON/LAS metadata (no add/edit/delete in Web).
 - **Local privacy**: All processing happens in your browser; no data is uploaded to a server.
 
 ## ⚠️ Limitations (Compared to Desktop Qt)
 - No polygon/box/lasso selection for per-point labeling.
 - No per-point class/instance editing.
+- No component add/edit/delete operations (view-only).
 - No LAZ/LAS write-back from the browser.
 - No category/instance visibility panels.
+- Temporary: components with `component_type = "绝缘子串"` are hidden in Web display (3D markers and sidebar list).
 
 ## 📁 Data Formats
 
