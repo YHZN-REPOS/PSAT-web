@@ -195,6 +195,116 @@ const logAttributeStats = (label, attr) => {
     console.log(`[LAS] ${label}: len=${len} ctor=${values.constructor.name} size=${attr.size || 1} min=${min} max=${max} sample=${JSON.stringify(sample)}`)
 }
 
+const getFiniteNumber = (value, fallback = 0) => {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : fallback
+}
+
+const resolveLasOffset = (data, positions = null) => {
+    if (!data) return [0, 0, 0]
+
+    const loaderData = data.loaderData || {}
+    if (Array.isArray(loaderData.mins) && loaderData.mins.length >= 3) {
+        return [
+            getFiniteNumber(loaderData.mins[0]),
+            getFiniteNumber(loaderData.mins[1]),
+            getFiniteNumber(loaderData.mins[2])
+        ]
+    }
+
+    if (Array.isArray(loaderData.offset) && loaderData.offset.length >= 3) {
+        return [
+            getFiniteNumber(loaderData.offset[0]),
+            getFiniteNumber(loaderData.offset[1]),
+            getFiniteNumber(loaderData.offset[2])
+        ]
+    }
+
+    const header = data.header || {}
+    if (Array.isArray(header.mins) && header.mins.length >= 3) {
+        return [
+            getFiniteNumber(header.mins[0]),
+            getFiniteNumber(header.mins[1]),
+            getFiniteNumber(header.mins[2])
+        ]
+    }
+
+    if (Array.isArray(header.boundingBox) && Array.isArray(header.boundingBox[0]) && header.boundingBox[0].length >= 3) {
+        return [
+            getFiniteNumber(header.boundingBox[0][0]),
+            getFiniteNumber(header.boundingBox[0][1]),
+            getFiniteNumber(header.boundingBox[0][2])
+        ]
+    }
+
+    if (positions && positions.length >= 3) {
+        return [
+            getFiniteNumber(positions[0]),
+            getFiniteNumber(positions[1]),
+            getFiniteNumber(positions[2])
+        ]
+    }
+
+    return [0, 0, 0]
+}
+
+const resolveLasSize = (data) => {
+    if (!data) return [0, 0, 0]
+
+    const loaderData = data.loaderData || {}
+    if (
+        Array.isArray(loaderData.maxs) &&
+        loaderData.maxs.length >= 3 &&
+        Array.isArray(loaderData.mins) &&
+        loaderData.mins.length >= 3
+    ) {
+        return [
+            Math.max(0, getFiniteNumber(loaderData.maxs[0]) - getFiniteNumber(loaderData.mins[0])),
+            Math.max(0, getFiniteNumber(loaderData.maxs[1]) - getFiniteNumber(loaderData.mins[1])),
+            Math.max(0, getFiniteNumber(loaderData.maxs[2]) - getFiniteNumber(loaderData.mins[2]))
+        ]
+    }
+
+    const header = data.header || {}
+    if (Array.isArray(header.boundingBox) && Array.isArray(header.boundingBox[0]) && Array.isArray(header.boundingBox[1])) {
+        const min = header.boundingBox[0]
+        const max = header.boundingBox[1]
+        if (min.length >= 3 && max.length >= 3) {
+            return [
+                Math.max(0, getFiniteNumber(max[0]) - getFiniteNumber(min[0])),
+                Math.max(0, getFiniteNumber(max[1]) - getFiniteNumber(min[1])),
+                Math.max(0, getFiniteNumber(max[2]) - getFiniteNumber(min[2]))
+            ]
+        }
+    }
+
+    return [0, 0, 0]
+}
+
+const normalizeLabelCoordToWorld = (coord, sceneOffset, sceneSize) => {
+    const c = [getFiniteNumber(coord[0]), getFiniteNumber(coord[1]), getFiniteNumber(coord[2])]
+    const offset = [
+        getFiniteNumber(sceneOffset?.[0]),
+        getFiniteNumber(sceneOffset?.[1]),
+        getFiniteNumber(sceneOffset?.[2])
+    ]
+    const size = [
+        Math.max(0, getFiniteNumber(sceneSize?.[0])),
+        Math.max(0, getFiniteNumber(sceneSize?.[1])),
+        Math.max(0, getFiniteNumber(sceneSize?.[2]))
+    ]
+
+    const validSpan = Math.max(size[0], size[1], size[2], 1)
+    const margin = Math.max(1, validSpan * 0.1)
+    const looksLocal = c.every((v, i) => v >= -margin && v <= size[i] + margin)
+    const looksWorld = c.every((v, i) => Math.abs(v - offset[i]) <= size[i] * 2 + margin)
+
+    if (looksWorld || !looksLocal) {
+        return c
+    }
+    return [c[0] + offset[0], c[1] + offset[1], c[2] + offset[2]]
+}
+
 const extractExtraAttributes = async (file) => {
     if (!file) return null
     const buffer = await file.arrayBuffer()
@@ -327,25 +437,20 @@ function PointCloud({ data, onPick, viewMode, pointSize, componentAddMode, onSet
         // 1. Handle Positions
         if (attributes.POSITION) {
             const positions = attributes.POSITION.value
-            // Fix: Use boundingBox if mins is undefined
-            let offset = [0, 0, 0]
-            if (header.boundingBox) {
-                offset = header.boundingBox[0]
-            } else if (header.mins) {
-                offset = [header.mins[0], header.mins[1], header.mins[2]]
-            } else if (positions.length >= 3) {
-                offset = [positions[0], positions[1], positions[2]]
-            }
+            const offset = resolveLasOffset(data, positions)
+            const ox = getFiniteNumber(offset[0])
+            const oy = getFiniteNumber(offset[1])
+            const oz = getFiniteNumber(offset[2])
 
             const centeredPositions = new Float32Array(totalPoints * 3)
             for (let i = 0; i < totalPoints; i++) {
-                centeredPositions[i * 3] = positions[i * 3] - offset[0]
-                centeredPositions[i * 3 + 1] = positions[i * 3 + 1] - offset[1]
-                centeredPositions[i * 3 + 2] = positions[i * 3 + 2] - offset[2]
+                centeredPositions[i * 3] = getFiniteNumber(positions[i * 3]) - ox
+                centeredPositions[i * 3 + 1] = getFiniteNumber(positions[i * 3 + 1]) - oy
+                centeredPositions[i * 3 + 2] = getFiniteNumber(positions[i * 3 + 2]) - oz
             }
 
             geom.setAttribute('position', new THREE.BufferAttribute(centeredPositions, 3))
-            geom.userData.offset = offset
+            geom.userData.offset = [ox, oy, oz]
             geom.computeBoundingSphere()
         }
 
@@ -589,14 +694,8 @@ function Scene({
             console.log('Scene: No lasData, returning [0,0,0] offset')
             return [0, 0, 0]
         }
-        const header = lasData.header
-        let off = [0, 0, 0]
-        if (header.boundingBox) off = header.boundingBox[0]
-        else if (header.mins) off = [header.mins[0], header.mins[1], header.mins[2]]
-        else if (lasData.attributes && lasData.attributes.POSITION && lasData.attributes.POSITION.value.length >= 3) {
-            const pos = lasData.attributes.POSITION.value
-            off = [pos[0], pos[1], pos[2]]
-        }
+        const positions = lasData.attributes?.POSITION?.value || null
+        const off = resolveLasOffset(lasData, positions)
         console.log('Scene: Calculated Offset:', off)
 
         // Debug first point
@@ -853,7 +952,8 @@ function App() {
             console.log('Starting load...', lasFile.name)
             // Use worker: false to avoid WASM issues
             const data = await load(lasFile, LASLoader, {
-                las: { skip: 1 },
+                // Use fp64 while decoding LAS world coordinates to avoid large-coordinate precision loss.
+                las: { skip: 1, fp64: true },
                 worker: false
             })
 
@@ -865,6 +965,8 @@ function App() {
                 const text = await jsonFile.text()
                 console.log('App: JSON text length:', text.length)
                 const json = JSON.parse(text)
+                const sceneOffset = resolveLasOffset(data, data.attributes?.POSITION?.value || null)
+                const sceneSize = resolveLasSize(data)
 
                 const meta = {
                     voltage_level: json.voltage_level ?? null,
@@ -918,27 +1020,45 @@ function App() {
                     ? json.components
                     : (json.components && typeof json.components === 'object' ? Object.values(json.components) : [])
                 rawComponents.forEach((comp) => {
-                    normalizedComponents.push(normalizeComponent(comp, normalizedComponents.length))
+                    const normalized = normalizeComponent(comp, normalizedComponents.length)
+                    normalized.originalPosition = normalizeLabelCoordToWorld(
+                        readComponentCoord(normalized),
+                        sceneOffset,
+                        sceneSize
+                    )
+                    normalizedComponents.push(normalized)
                 })
 
                 const towerComponents = []
                 if (Array.isArray(json.small_tower_coord)) {
-                    towerComponents.push(normalizeComponent({
+                    const tower = normalizeComponent({
                         name: TOWER_SMALL_NAME,
                         component_position: TOWER_SMALL_NAME,
                         component_name: TOWER_SMALL_NAME,
                         coord: json.small_tower_coord,
                         isTowerSide: true
-                    }, towerComponents.length))
+                    }, towerComponents.length)
+                    tower.originalPosition = normalizeLabelCoordToWorld(
+                        readComponentCoord(tower),
+                        sceneOffset,
+                        sceneSize
+                    )
+                    towerComponents.push(tower)
                 }
                 if (Array.isArray(json.large_tower_coord)) {
-                    towerComponents.push(normalizeComponent({
+                    const tower = normalizeComponent({
                         name: TOWER_LARGE_NAME,
                         component_position: TOWER_LARGE_NAME,
                         component_name: TOWER_LARGE_NAME,
                         coord: json.large_tower_coord,
                         isTowerSide: true
-                    }, towerComponents.length))
+                    }, towerComponents.length)
+                    tower.originalPosition = normalizeLabelCoordToWorld(
+                        readComponentCoord(tower),
+                        sceneOffset,
+                        sceneSize
+                    )
+                    towerComponents.push(tower)
                 }
 
                 const mergedComponents = [...towerComponents, ...normalizedComponents]
